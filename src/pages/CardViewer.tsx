@@ -1,45 +1,106 @@
-import { useState } from "react";
-import { useParams, Link, useNavigate } from "react-router";
+import { useState, useEffect } from "react";
+import { useParams, Link, useNavigate, useSearchParams } from "react-router";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuth } from "@/hooks/use-auth";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import DashboardLayout from "@/layouts/DashboardLayout";
-import { Loader2, FilePlus2, Trash2, ExternalLink } from "lucide-react";
+import { Loader2, FilePlus2, Trash2, ExternalLink, QrCode } from "lucide-react";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { motion } from "framer-motion";
 
 export default function CardViewer() {
   const { cardId: customId } = useParams<{ cardId: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user, token } = useAuth();
   const navigate = useNavigate();
   const [isExpanded, setIsExpanded] = useState(false);
+  const [showClaimDialog, setShowClaimDialog] = useState(false);
+  const [claimCode, setClaimCode] = useState("");
+  const [isVerified, setIsVerified] = useState(false);
+
+  const verifyToken = searchParams.get("verify");
+  const method = searchParams.get("method");
 
   const card = useQuery(api.cards.get, customId ? { customId } : "skip");
+  const verifyResult = useQuery(
+    api.cards.validateVerifyToken,
+    verifyToken && customId ? { customId, verifyToken } : "skip"
+  );
+  
   const userCard = useQuery(
     api.userCards.getForCurrentUser,
     card && token ? { cardId: card._id, token } : "skip"
   );
-  const addUserCard = useMutation(api.userCards.add);
+  
+  const addWithClaimCode = useMutation(api.userCards.addWithClaimCode);
   const deleteCardMutation = useMutation(api.cards.deleteCard);
   const createCardWithId = useMutation(api.cards.createCardWithId);
+  const consumeToken = useMutation(api.cards.consumeVerifyToken);
 
-  const handleAddToInventory = async () => {
+  // Handle QR code verification flow
+  useEffect(() => {
+    if (verifyToken && verifyResult && customId) {
+      if (verifyResult.valid) {
+        // Valid QR scan - mark as verified and immediately redirect to method=valid
+        // This hides the verification token from the URL
+        setIsVerified(true);
+        setSearchParams({ method: "valid" }, { replace: true });
+        // Consume the token so it can't be reused
+        if (verifyResult.cardId) {
+          consumeToken({ cardId: verifyResult.cardId }).catch(() => {});
+        }
+      } else {
+        // Invalid or expired token
+        toast.error(verifyResult.reason || "Invalid QR code");
+        navigate(`/cards/${customId}`, { replace: true });
+      }
+    } else if (method === "valid" && !isVerified) {
+      // Someone tried to access method=valid directly without scanning
+      toast.error("Please scan the QR code on your physical card");
+      navigate(`/cards/${customId}`, { replace: true });
+    }
+  }, [verifyToken, verifyResult, method, isVerified, customId, setSearchParams, consumeToken, navigate]);
+
+  const handleClaimCard = async () => {
     if (!token || !customId || !card) {
-      toast.error("You must be logged in to add cards.");
+      toast.error("You must be logged in to claim cards.");
       return;
     }
-    const toastId = toast.loading("Adding to inventory...");
+    
+    if (!isVerified) {
+      toast.error("Please scan the QR code on your physical card first.");
+      return;
+    }
+    
+    if (!claimCode.trim()) {
+      toast.error("Please enter the claim code from your physical card.");
+      return;
+    }
+    
+    const toastId = toast.loading("Claiming card...");
     try {
-      const result = await addUserCard({ token, cardId: card._id });
+      const result = await addWithClaimCode({ 
+        token, 
+        cardId: card._id,
+        claimCode: claimCode.trim()
+      });
       if (result.success) {
         toast.success(result.message, { id: toastId });
+        setShowClaimDialog(false);
+        setClaimCode("");
+        setIsVerified(false);
+        setSearchParams({});
       } else {
-        toast.info(result.message, { id: toastId });
+        toast.error(result.message, { id: toastId });
       }
     } catch (error) {
-      toast.error("Failed to add card to inventory.", { id: toastId });
+      toast.error("Failed to claim card.", { id: toastId });
     }
   };
 
@@ -52,7 +113,6 @@ export default function CardViewer() {
     try {
       await createCardWithId({ token, customId });
       toast.success("New card created! Redirecting to editor...", { id: toastId });
-      // Add a short delay to ensure the editor can see the newly created card
       await new Promise((resolve) => setTimeout(resolve, 500));
       navigate(`/editor/card/${customId}`);
     } catch (error: any) {
@@ -132,7 +192,17 @@ export default function CardViewer() {
 
   return (
     <DashboardLayout>
-      <div className="container mx-auto py-8 flex justify-center items-center">
+      <div className="container mx-auto py-8 flex flex-col justify-center items-center gap-4">
+        {/* QR Verification Alert */}
+        {!isVerified && user && (
+          <Alert className="max-w-md bg-yellow-900/20 border-yellow-500/50">
+            <QrCode className="h-4 w-4" />
+            <AlertDescription className="text-yellow-200">
+              To claim this card, please scan the QR code on your physical card first.
+            </AlertDescription>
+          </Alert>
+        )}
+
         <motion.div layout onClick={() => setIsExpanded(!isExpanded)} className="cursor-pointer">
           <Card className="max-w-md bg-black text-white border-slate-700">
               <CardHeader>
@@ -183,11 +253,18 @@ export default function CardViewer() {
               <CardFooter className="flex flex-col gap-2">
                   {user && (
                       <Button 
-                        onClick={handleAddToInventory} 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!isVerified) {
+                            toast.error("Please scan the QR code on your physical card first");
+                            return;
+                          }
+                          setShowClaimDialog(true);
+                        }} 
                         className="w-full bg-red-600 hover:bg-red-700 disabled:bg-slate-600 disabled:cursor-not-allowed"
-                        disabled={cardIsInInventory}
+                        disabled={cardIsInInventory || !isVerified}
                       >
-                          {cardIsInInventory ? "Card in Inventory" : "Add to Digital Inventory"}
+                          {cardIsInInventory ? "Card in Inventory" : isVerified ? "Claim Card" : "Scan QR Code First"}
                       </Button>
                   )}
                   {isAuthorizedEditor && (
@@ -205,6 +282,43 @@ export default function CardViewer() {
           </Card>
         </motion.div>
       </div>
+
+      {/* Claim Code Dialog */}
+      <Dialog open={showClaimDialog} onOpenChange={setShowClaimDialog}>
+        <DialogContent className="bg-slate-900 border-red-500/20 text-white">
+          <DialogHeader>
+            <DialogTitle className="text-red-400">Claim Card</DialogTitle>
+            <DialogDescription className="text-slate-300">
+              Enter the unique claim code printed on your physical card to add it to your inventory.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="claimCode" className="text-slate-200">Claim Code</Label>
+              <Input
+                id="claimCode"
+                value={claimCode}
+                onChange={(e) => setClaimCode(e.target.value)}
+                placeholder="Enter claim code"
+                className="bg-slate-800 border-slate-700 text-white"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleClaimCard();
+                  }
+                }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowClaimDialog(false)} className="border-slate-600 text-slate-300">
+              Cancel
+            </Button>
+            <Button onClick={handleClaimCard} className="bg-red-600 hover:bg-red-700">
+              Claim Card
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </DashboardLayout>
   );
 }

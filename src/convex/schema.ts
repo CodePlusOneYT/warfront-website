@@ -1,5 +1,5 @@
 import { defineSchema, defineTable } from "convex/server";
-import { Infer, v } from "convex/values";
+import { v, Infer } from "convex/values";
 
 // default user roles. can add / remove based on the project as needed
 export const ROLES = {
@@ -139,11 +139,19 @@ const schema = defineSchema(
       attackSlots: v.optional(v.number()),
       abilitySlots: v.optional(v.number()),
       passiveSlots: v.optional(v.number()),
+      // Security: One-time claim code
+      claimCode: v.optional(v.string()), // Unique code printed on physical card
+      isClaimed: v.optional(v.boolean()), // Whether this card has been claimed
+      // QR verification tokens
+      verifyToken: v.optional(v.string()), // Current active verification token
+      verifyTokenExpiry: v.optional(v.number()), // Token expiration timestamp
     })
       .index("by_customId", ["customId"])
       .index("by_name_normalized", ["name_normalized"])
       .index("by_rarityId", ["rarityId"])
-      .index("by_upgradeId", ["upgradeId"]),
+      .index("by_upgradeId", ["upgradeId"])
+      .index("by_claimCode", ["claimCode"])
+      .index("by_verifyToken", ["verifyToken"]),
 
     // New tables for the card management system
     rarities: defineTable({
@@ -235,6 +243,20 @@ const schema = defineSchema(
       metaDescription: v.optional(v.string()),
       metaKeywords: v.optional(v.string()),
     }).index("by_slug", ["slug"]),
+
+    cms_pages: defineTable({
+      path: v.string(),
+      title: v.string(),
+      category: v.union(
+        v.literal("unsorted"),
+        v.literal("public"),
+        v.literal("private"),
+        v.literal("cards"),
+        v.literal("robot"),
+      ),
+    })
+      .index("by_path", ["path"])
+      .index("by_category", ["category"]),
   },
   {
     schemaValidation: false,
